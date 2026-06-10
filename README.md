@@ -2,7 +2,7 @@
 
 A translational prioritization platform for liver noncoding RNA targets in MASLD/MASH, fibrosis, and HCC contexts.
 
-This project combines curated evidence, perturbation support, disease-context expression features, and a Geneformer-like scoring framework to rank ncRNA targets and present them through an interactive Streamlit dashboard. The goal is to move beyond static target lists and provide a more interpretable, evidence-aware prioritization workflow for translational target discovery. [Local repo structure: `app/`, `db/`, `etl/`, `models/`, `output/`, `outputs/`, `scripts/`, `ncrna_platform.db`]
+This project combines curated evidence, perturbation support, disease-context expression features, and a Geneformer-like scoring framework to rank ncRNA targets and present them through an interactive Streamlit dashboard. The goal is to move beyond static target lists and provide a more interpretable, evidence-aware prioritization workflow for translational target discovery.
 
 ## Project Overview
 
@@ -18,7 +18,7 @@ The dashboard is built to support both exploratory target discovery and presenta
 
 ## What the Dashboard Does
 
-The Streamlit dashboard provides an interactive interface for reviewing ranked ncRNA targets in a selected liver disease and tissue/cell context.
+The Streamlit dashboard provides an interactive interface for reviewing ranked ncRNA targets in a selected liver disease and tissue or cell context.
 
 Core dashboard capabilities include:
 
@@ -36,17 +36,19 @@ Core dashboard capabilities include:
 The current dashboard version introduces a more presentation-ready and biologically interpretable target review workflow.
 
 ### Evidence stratification
+
 Target dossiers now separate:
 
-- **Literature-backed evidence**
-- **Quantitative support**
-- **Model-integrated / cohort-level hypotheses**
-- **Supported mechanism statements**
-- **Unspecified evidence statements**
+- literature-backed evidence,
+- quantitative support,
+- model-integrated or cohort-level hypotheses,
+- supported mechanism statements,
+- unspecified evidence statements.
 
 This prevents paper-backed findings from being mixed with model-derived or observational hypotheses.
 
 ### Mechanism interpretation
+
 Downstream mechanism summaries now use explicit evidence typing to distinguish:
 
 - direct perturbation or supported mechanistic evidence,
@@ -56,6 +58,7 @@ Downstream mechanism summaries now use explicit evidence typing to distinguish:
 Supported perturbation modalities such as **ASO**, **siRNA**, and **CRISPRi** are treated as intervention-level evidence classes.
 
 ### Improved traceability
+
 The dashboard now makes it easier to understand why a target ranks highly by exposing:
 
 - baseline rank,
@@ -66,6 +69,7 @@ The dashboard now makes it easier to understand why a target ranks highly by exp
 - model comparison summary.
 
 ### Cleaner presentation flow
+
 The dossier layout is streamlined for review with collaborators, hiring managers, or scientific stakeholders. Evidence categories are easier to explain, duplicate mechanism rows are collapsed before rendering, and quantitative score support is shown separately from paper-backed statements.
 
 ## Example Use Case
@@ -100,7 +104,7 @@ The baseline score reflects the broader translational prioritization framework. 
 
 The dashboard also shows **delta rank**, defined as:
 
-- baseline rank minus Geneformer-like rank
+- baseline rank minus Geneformer-like rank.
 
 A positive delta indicates that a target rises under the Geneformer-like prioritization framework.
 
@@ -113,7 +117,7 @@ In the latest comparison, the project distinguishes between:
 - an earlier baseline run with `confidence_tier` present in model features,
 - a newer ablation run that excludes `confidence_tier` to reduce label leakage.
 
-This improves interpretability by shifting model importance toward more biologically meaningful signals such as disease shift, perturbation impact, expression change, and relevance/specificity features.
+This improves interpretability by shifting model importance toward more biologically meaningful signals such as disease shift, perturbation impact, expression change, and relevance or specificity features.
 
 ## Repository Structure
 
@@ -122,18 +126,18 @@ ncrna_platform/
 ├── app/                    # Streamlit dashboard application
 ├── configs/                # Configuration files
 ├── data/                   # Source and intermediate data assets
-├── db/                     # Database schema and DB-related utilities
+├── db/                     # SQLite database(s), seed files, and DB utilities
 ├── etl/                    # ETL pipelines for feature assembly and ingestion
-├── misc/                   # Miscellaneous utilities
+├── misc/                   # Temporary or scratch utilities
 ├── models/                 # Feature engineering and model code
+├── notebooks/              # Exploratory and development notebooks
 ├── output/                 # Current model outputs and benchmark artifacts
-├── outputs/                # Prior output artifacts / comparisons
+├── outputs/                # Prior output artifacts and saved comparisons
 ├── scripts/                # Utility and reporting scripts
-├── dashboard.png           # Dashboard image asset
-├── health_check.py         # Health check script
-├── ncrna_platform.db       # SQLite database backing the dashboard
+├── LICENSE
 ├── README.md
-└── requirements.txt
+├── requirements.txt
+└── ncrna_platform.db       # Legacy root-level DB file, if still present
 ```
 
 ## Key Data and Evidence Layers
@@ -145,10 +149,22 @@ The platform can incorporate multiple categories of evidence and feature provena
 - downstream effects,
 - perturbation studies,
 - disease-shift features,
-- TCGA pancancer expression context,
+- TCGA pan-cancer expression context,
 - risk flags and contradiction indicators.
 
 These layers are surfaced in the dashboard through evidence sections, component tables, and raw provenance views.
+
+## Database Notes
+
+The main SQLite database should live at:
+
+```text
+db/ncrna_platform.db
+```
+
+Backup database files may also exist in `db/`, for example development snapshots created before targeted fixes. These backup files are not intended for normal dashboard runs and should not be used as the default application database.
+
+If scripts previously referenced `ncrna_platform.db` from the repository root, they should be updated to use the `db/` path instead.
 
 ## Running the App Locally
 
@@ -160,6 +176,8 @@ streamlit run app/dashboard.py
 ```
 
 If the local SQLite database is missing or incomplete, regenerate it through the ETL and scoring pipeline before launching the app.
+
+By default, the dashboard should point to `db/ncrna_platform.db` rather than a root-level database file.
 
 ## Recommended Demo Flow
 
@@ -186,8 +204,8 @@ Potential next steps for the platform include:
 - broader multi-disease and multi-tissue ncRNA prioritization,
 - stronger deployment synchronization between local artifacts and hosted app state,
 - richer perturbation metadata and causal evidence grading,
-- interactive visualization of target–gene–phenotype relationships,
-- versioned model/evidence snapshots for reproducible dashboard states.
+- interactive visualization of target-gene-phenotype relationships,
+- versioned model and evidence snapshots for reproducible dashboard states.
 
 ## License
 

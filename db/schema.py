@@ -131,6 +131,26 @@ def create_database(db_path="ncrna_platform.db"):
         added_date                  TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS binding_features (
+        binding_id                  TEXT PRIMARY KEY,
+        ncrna_id                    TEXT REFERENCES ncrna_master(ncrna_id),
+        n_high_conf_rbps            INTEGER,
+        max_rbp_score               REAL,
+        mean_top5_rbp_score         REAL,
+        liver_rbp_score             REAL,
+        max_peak_score              REAL,
+        peak_density                REAL,
+        n_binding_hotspots          INTEGER,
+        hotspot_5prime_fraction     REAL,
+        hotspot_3prime_fraction     REAL,
+        binding_mechanism_score     REAL,
+        binding_targetability_score REAL,
+        binding_risk_score          REAL,
+        parpi_model_version         TEXT,
+        ideepb_model_version        TEXT,
+        last_updated                TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS literature_evidence (
         lit_id              TEXT PRIMARY KEY,
         ncrna_id            TEXT REFERENCES ncrna_master(ncrna_id),
@@ -142,6 +162,24 @@ def create_database(db_path="ncrna_platform.db"):
         journal             TEXT,
         year                INTEGER,
         is_contradictory    INTEGER DEFAULT 0,
+        added_date          TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS downstream_effects (
+        effect_id           TEXT PRIMARY KEY,
+        ncrna_id            TEXT REFERENCES ncrna_master(ncrna_id),
+        target_gene         TEXT,
+        target_ensembl_id   TEXT,
+        effect_direction    TEXT,
+        effect_type         TEXT,
+        phenotype_category  TEXT,
+        phenotype_direction TEXT,
+        evidence_type       TEXT,
+        evidence_source     TEXT,
+        evidence_score      REAL,
+        pubmed_id           TEXT,
+        dataset_id          TEXT,
+        notes               TEXT,
         added_date          TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -184,6 +222,7 @@ def seed_liver_masld_data(conn):
         ("LNCRNA_008", "LINC01116", json.dumps([]), "lncRNA", "chr2", 96524110, 96535200, "+", 2, 0.43, "ENSG00000230876"),
         ("LNCRNA_009", "MIAT", json.dumps(["GOMAFU"]), "lncRNA", "chr22", 26669592, 26797219, "+", 5, 0.68, "ENSG00000225783"),
         ("LNCRNA_010", "XIST", json.dumps(["LINC00023"]), "lncRNA", "chrX", 73820651, 73852723, "+", 8, 0.93, "ENSG00000229807"),
+        ("LNCRNA_011", "HNF4A-AS1", json.dumps(["HNF4A-AS", "HNF4A antisense 1"]), "lncRNA", "chr20", 42980000, 43020000, "+", 2, 0.81, "ENSG000002XXXX1"),
     ]
     c.executemany(
         "INSERT OR IGNORE INTO ncrna_master VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
@@ -220,7 +259,7 @@ def seed_liver_masld_data(conn):
 
     for nid in ncrna_ids:
         for did in disease_ids:
-            log2fc = float(np.random.normal(1.6 if nid in ["LNCRNA_001", "LNCRNA_005", "LNCRNA_006"] else -0.4, 0.9))
+            log2fc = float(np.random.normal(1.6 if nid in ["LNCRNA_001", "LNCRNA_005", "LNCRNA_006", "LNCRNA_011"] else -0.4, 0.9))
             pval = float(np.random.uniform(0.0001, 0.05))
             padj = pval * 10
             tpm_d = float(np.random.uniform(5, 200))
@@ -261,6 +300,7 @@ def seed_liver_masld_data(conn):
         ("TR_008", "LNCRNA_008", "nuclear", 2, 0.44, -22.1, 0, 0, 0, 0, "biomarker"),
         ("TR_009", "LNCRNA_009", "nuclear", 5, 0.59, -47.8, 1, 0, 0, 1, "ASO"),
         ("TR_010", "LNCRNA_010", "nuclear", 8, 0.67, -64.3, 1, 0, 0, 1, "ASO"),
+        ("TR_011", "LNCRNA_011", "nuclear", 2, 0.57, -46.0, 1, 0, 0, 1, "ASO"),
     ]
     c.executemany(
         "INSERT OR IGNORE INTO tractability_features VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
@@ -276,6 +316,7 @@ def seed_liver_masld_data(conn):
         ("PERT_006", "LNCRNA_007", "ASO", "p21", -1.6, "cell_cycle_arrest", "PHH", "Homo sapiens", "34567890", "medium"),
         ("PERT_007", "LNCRNA_003", "ASO", "PCNA", 1.1, "proliferation", "HepG2", "Homo sapiens", "33456789", "low"),
         ("PERT_008", "LNCRNA_009", "siRNA", "SRSF1", 0.9, "RNA_splicing", "HepG2", "Homo sapiens", "32345678", "low"),
+        ("PERT_009", "LNCRNA_011", "ASO", "HNF4A", 1.4, "hepatocyte_identity", "PHH", "Homo sapiens", "39999991", "medium"),
     ]
     c.executemany(
         "INSERT OR IGNORE INTO perturbation_evidence VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
@@ -289,6 +330,7 @@ def seed_liver_masld_data(conn):
         ("CLIN_004", "LNCRNA_005", "DIS_004", "OS_months", -0.61, 0.003, "prognostic", "tissue_biopsy", "TCGA_LIHC", "36543210"),
         ("CLIN_005", "LNCRNA_006", "DIS_004", "tumor_stage", 0.74, 0.001, "prognostic", "tissue_biopsy", "TCGA_LIHC", "39876543"),
         ("CLIN_006", "LNCRNA_007", "DIS_001", "insulin_resist", -0.48, 0.02, "predictive", "tissue_biopsy", "COHORT_DE", "34567890"),
+        ("CLIN_007", "LNCRNA_011", "DIS_001", "steatosis_grade", 0.44, 0.03, "predictive", "tissue_biopsy", "COHORT_UK", "39999991"),
     ]
     c.executemany(
         "INSERT OR IGNORE INTO clinical_links VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
@@ -304,6 +346,7 @@ def seed_liver_masld_data(conn):
         ("LIT_006", "LNCRNA_006", "DIS_004", "HOTAIR epigenetically silences tumor suppressors in HCC", "promotes", 0.91, "39876543", "Nat Commun", 2023, 0),
         ("LIT_007", "LNCRNA_007", "DIS_001", "GAS5 restrains hepatic glucose production", "suppresses", 0.76, "34567890", "Cell Metab", 2021, 0),
         ("LIT_008", "LNCRNA_008", "DIS_002", "LINC01116 expression unchanged in MASH cohort — contradictory finding", "mixed", 0.42, "38888888", "PLoS ONE", 2022, 1),
+        ("LIT_009", "LNCRNA_011", "DIS_001", "HNF4A-AS1 is associated with hepatocyte differentiation and lipid metabolism programs", "mixed", 0.72, "39999991", "Hepatology Reports", 2024, 0),
     ]
     c.executemany(
         "INSERT OR IGNORE INTO literature_evidence VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
@@ -318,6 +361,7 @@ def seed_liver_masld_data(conn):
         ("PW_005", "LNCRNA_005", "PI3K-Akt signaling", "KEGG", "hsa04151", 0.004, 0.015, "red", "AKT1", 0.68),
         ("PW_006", "LNCRNA_006", "Polycomb repression", "Reactome", "R-HSA-212300", 0.001, 0.003, "green", "EZH2", 0.88),
         ("PW_007", "LNCRNA_007", "p53 signaling", "KEGG", "hsa04115", 0.005, 0.018, "yellow", "TP53", 0.65),
+        ("PW_008", "LNCRNA_011", "Hepatocyte differentiation", "Reactome", "R-HSA-9000001", 0.004, 0.017, "purple", "HNF4A", 0.73),
     ]
     c.executemany(
         "INSERT OR IGNORE INTO pathway_links VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
@@ -329,8 +373,91 @@ def seed_liver_masld_data(conn):
     return conn
 
 
+def seed_downstream_effects(conn):
+    c = conn.cursor()
+
+    seed_rows = [
+        (
+            "EFF_001", "LNCRNA_001", "FASN", None, "down", "expression",
+            "steatosis", "improves", "ASO", "perturbation_dataset", 0.90,
+            "37234567", "GSE130970",
+            "HNF1A-AS1 ASO knockdown reduces FASN and hepatic lipid accumulation"
+        ),
+        (
+            "EFF_002", "LNCRNA_001", "COL1A1", None, "down", "expression",
+            "fibrosis", "improves", "siRNA", "perturbation_dataset", 0.80,
+            "35123456", "GSE135251",
+            "HNF1A-AS1 knockdown reduces fibrosis markers in MASH/fibrotic context"
+        ),
+        (
+            "EFF_003", "LNCRNA_002", "TGFB1", None, "up", "expression",
+            "fibrosis", "worsens", "ASO", "literature", 0.85,
+            "38765432", None,
+            "NEAT1 activates stellate cells via TGF-beta signaling"
+        ),
+        (
+            "EFF_004", "LNCRNA_003", "PCNA", None, "up", "expression",
+            "proliferation", "worsens", "ASO", "literature", 0.80,
+            "33456789", "TCGA-LIHC",
+            "MALAT1 overexpression associated with proliferation and HCC recurrence"
+        ),
+        (
+            "EFF_005", "LNCRNA_005", "AKT1", None, "up", "expression",
+            "proliferation", "worsens", "siRNA", "literature", 0.85,
+            "36543210", "TCGA-LIHC",
+            "HULC drives HCC growth via AKT/mTOR signaling"
+        ),
+        (
+            "EFF_006", "LNCRNA_006", "EZH2", None, "up", "epigenetic",
+            "tumor_suppression", "worsens", "CRISPRi", "literature", 0.90,
+            "39876543", None,
+            "HOTAIR recruits EZH2 and silences tumor suppressor programs in HCC"
+        ),
+        (
+            "EFF_007", "LNCRNA_007", "G6PC", None, "down", "expression",
+            "glucose", "improves", "ASO", "literature", 0.75,
+            "34567890", None,
+            "GAS5 restrains hepatic glucose production"
+        ),
+        (
+            "EFF_008", "LNCRNA_011", "HNF4A", None, "up", "expression",
+            "hepatocyte_identity", "improves", "ASO", "literature", 0.78,
+            "39999991", None,
+            "HNF4A-AS1 supports hepatocyte identity programs linked to metabolic homeostasis"
+        ),
+    ]
+
+    c.executemany(
+        """
+        INSERT OR IGNORE INTO downstream_effects (
+            effect_id,
+            ncrna_id,
+            target_gene,
+            target_ensembl_id,
+            effect_direction,
+            effect_type,
+            phenotype_category,
+            phenotype_direction,
+            evidence_type,
+            evidence_source,
+            evidence_score,
+            pubmed_id,
+            dataset_id,
+            notes,
+            added_date
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        """,
+        seed_rows
+    )
+
+    conn.commit()
+    print("✅ Downstream effects seeded")
+    return conn
+
+
 if __name__ == "__main__":
     conn = create_database("ncrna_platform.db")
     seed_liver_masld_data(conn)
+    seed_downstream_effects(conn)
     conn.close()
     print("Database ready.")

@@ -1,6 +1,6 @@
 """
 ncRNA Target Intelligence Platform — Translational Scoring Engine
-Phase 2: curated target evidence integrated + raw provenance persistence
+Phase 3: biologic coherence scoring + contradiction-aware perturbation handling
 """
 
 import json
@@ -22,15 +22,20 @@ except Exception as e:
     print(f"⚠️ XGBoost unavailable; using GradientBoostingRegressor instead. Reason: {e}")
 
 from models.features import build_feature_matrix
-
+from models.biologic_coherence import (
+    score_biologic_coherence,
+    contradiction_summary,
+    aggregate_target_scores,
+)
 
 SCORE_WEIGHTS = {
-    "relevance": 0.22,
-    "specificity": 0.12,
-    "mechanism": 0.18,
-    "tractability": 0.12,
-    "human_evidence": 0.16,
-    "curated": 0.15,
+    "relevance": 0.20,
+    "specificity": 0.10,
+    "mechanism": 0.14,
+    "tractability": 0.10,
+    "human_evidence": 0.14,
+    "curated": 0.13,
+    "perturbation_biology": 0.14,
     "risk": 0.05,
 }
 
@@ -79,11 +84,22 @@ CURATED_FEATURES = [
     "curated_mash_flag",
 ]
 
+PERTURBATION_BIOLOGY_FEATURES = [
+    "biologic_coherence_score",
+    "best_biologic_evidence",
+    "mean_evidence_quality",
+    "perturbation_study_count",
+    "final_perturbation_biology_score",
+]
+
 RISK_FEATURES = [
     "risk_ubiquitous",
     "risk_contradictory_lit",
     "risk_high_isoforms",
     "curated_contradiction_flag",
+    "contradiction_flag",
+    "contradiction_penalty",
+    "mean_safety_penalty",
 ]
 
 ALL_FEATURE_COLS = (
@@ -93,6 +109,7 @@ ALL_FEATURE_COLS = (
     + TRACTABILITY_FEATURES
     + HUMAN_EVIDENCE_FEATURES
     + CURATED_FEATURES
+    + PERTURBATION_BIOLOGY_FEATURES
     + RISK_FEATURES
 )
 
@@ -122,6 +139,9 @@ GF_PERTURBATION_FEATURES = [
     "n_high_conf_perts",
     "mean_pert_effect",
     "de_consistency",
+    "final_perturbation_biology_score",
+    "biologic_coherence_score",
+    "best_biologic_evidence",
 ]
 
 GF_DISEASE_SHIFT_FEATURES = [
@@ -143,6 +163,9 @@ GF_RISK_FEATURES = [
     "risk_contradictory_lit",
     "risk_high_isoforms",
     "curated_contradiction_flag",
+    "contradiction_flag",
+    "contradiction_penalty",
+    "mean_safety_penalty",
 ]
 
 
@@ -243,6 +266,112 @@ def compute_risk_penalty(df: pd.DataFrame) -> pd.Series:
     return (1.0 - risk_raw).clip(0.0, 1.0)
 
 
+def load_biologic_coherence_features(
+    db_path: str,
+    disease_id: str | None = None,
+    context_id: str | None = None,
+) -> pd.DataFrame:
+    conn = sqlite3.connect(db_path)
+    try:
+        expected_df = pd.read_sql_query("SELECT * FROM expected_biology", conn)
+        perturb_df = pd.read_sql_query("SELECT * FROM perturbation_evidence", conn)
+    except Exception as e:
+        print(f"⚠️ Biologic coherence tables missing or unreadable: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+    if expected_df.empty or perturb_df.empty:
+        print("⚠️ No biologic coherence data available (expected_biology or perturbation_evidence empty).")
+        return pd.DataFrame()
+
+    if disease_id and "disease_context" in expected_df.columns and "disease_context" in perturb_df.columns:
+        mask_exp = expected_df["disease_context"].astype(str).str.contains(disease_id, case=False, na=False) | (
+            expected_df["disease_context"].astype(str) == disease_id
+        )
+        mask_pert = perturb_df["disease_context"].astype(str).str.contains(disease_id, case=False, na=False) | (
+            perturb_df["disease_context"].astype(str) == disease_id
+        )
+        expected_df = expected_df[mask_exp]
+        perturb_df = perturb_df[mask_pert]
+
+    if context_id and "cell_context" in expected_df.columns and "cell_context" in perturb_df.columns:
+        mask_exp = expected_df["cell_context"].astype(str).str.contains(context_id, case=False, na=False) | (
+            expected_df["cell_context"].astype(str) == context_id
+        )
+        mask_pert = perturb_df["cell_context"].astype(str).str.contains(context_id, case=False, na=False) | (
+            perturb_df["cell_context"].astype(str) == context_id
+        )
+        expected_df = expected_df[mask_exp]
+        perturb_df = perturb_df[mask_pert]
+
+    if expected_df.empty or perturb_df.empty:
+        print("⚠️ Biologic coherence: no rows after disease/context filtering.")
+        return pd.DataFrame()
+
+    scored = score_biologic_coherence(expected_df, perturb_df)
+    contrad = contradiction_summary(scored)
+    agg = aggregate_target_scores(scored, contrad)
+
+    if "target_id" in agg.columns and "ncrna_id" not in agg.columns:
+        agg = agg.rename(columns={"target_id": "ncrna_id"})
+
+    return agg
+
+
+def merge_biologic_coherence_features(
+    feature_df: pd.DataFrame,
+    db_path: str,
+    disease_id: str,
+    context_id: str,
+) -> pd.DataFrame:
+    out = feature_df.copy()
+    bc_df = load_biologic_coherence_features(db_path, disease_id, context_id)
+
+    fill_cols = [
+        "biologic_coherence_score",
+        "best_biologic_evidence",
+        "mean_evidence_quality",
+        "mean_safety_penalty",
+        "perturbation_study_count",
+        "contradiction_flag",
+        "contradiction_penalty",
+        "final_perturbation_biology_score",
+    ]
+
+    if bc_df.empty:
+        for col in fill_cols:
+            if col not in out.columns:
+                out[col] = 0.0
+        return out
+
+    join_keys = [c for c in ["ncrna_id", "gene_symbol", "disease_context", "cell_context"] if c in out.columns and c in bc_df.columns]
+
+    if not join_keys and "ncrna_id" in out.columns and "ncrna_id" in bc_df.columns:
+        join_keys = ["ncrna_id"]
+
+    if not join_keys and "symbol" in out.columns and "gene_symbol" in bc_df.columns:
+        bc_df = bc_df.rename(columns={"gene_symbol": "symbol"})
+        join_keys = ["symbol"]
+
+    if not join_keys:
+        for col in fill_cols:
+            if col not in out.columns:
+                out[col] = 0.0
+        return out
+
+    out = out.merge(bc_df, on=join_keys, how="left")
+
+    for col in fill_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+
+    if "contradiction_flag" in out.columns:
+        out["contradiction_flag"] = out["contradiction_flag"].astype(int)
+
+    return out
+
+
 def compute_translational_scores(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -252,7 +381,55 @@ def compute_translational_scores(df: pd.DataFrame) -> pd.DataFrame:
     df["tractability_score"] = compute_component_score(df, TRACTABILITY_FEATURES)
     df["human_evidence_score"] = compute_component_score(df, HUMAN_EVIDENCE_FEATURES)
     df["curated_score"] = compute_component_score(df, CURATED_FEATURES)
+
+    for col, default in {
+        "final_perturbation_biology_score": 0.0,
+        "biologic_coherence_score": 0.0,
+        "best_biologic_evidence": 0.0,
+        "mean_evidence_quality": 0.0,
+        "mean_safety_penalty": 0.0,
+        "perturbation_study_count": 0.0,
+        "contradiction_flag": 0,
+        "contradiction_penalty": 0.0,
+        "mean_lit_confidence": 0.0,
+        "n_unique_papers": 0.0,
+        "n_pathways": 0.0,
+        "n_high_conf_perts": 0.0,
+    }.items():
+        if col not in df.columns:
+            df[col] = default
+
+    lit_conf = _safe_numeric(df["mean_lit_confidence"]).fillna(0.0).clip(0.0, 1.0)
+    paper_count = _safe_numeric(df["n_unique_papers"]).fillna(0.0)
+    pathway_count = _safe_numeric(df["n_pathways"]).fillna(0.0)
+    high_conf_perts = _safe_numeric(df["n_high_conf_perts"]).fillna(0.0)
+
+    paper_flag = (paper_count > 0).astype(float)
+    mech_flag = (pathway_count > 0).astype(float)
+    pert_flag = (high_conf_perts > 0).astype(float)
+    high_conf_lit_flag = (lit_conf >= 0.8).astype(float)
+
+    df["mechanism_score"] = (
+        0.70 * df["mechanism_score"].fillna(0.0)
+        + 0.20 * lit_conf
+        + 0.10 * mech_flag
+    ).clip(0.0, 1.0)
+
+    df["human_evidence_score"] = (
+        0.70 * df["human_evidence_score"].fillna(0.0)
+        + 0.20 * paper_flag
+        + 0.10 * lit_conf
+    ).clip(0.0, 1.0)
+
+    df["perturbation_biology_score"] = compute_component_score(df, PERTURBATION_BIOLOGY_FEATURES)
     df["risk_score"] = compute_risk_penalty(df)
+
+    df["evidence_bonus"] = (
+        0.08 * paper_flag
+        + 0.06 * high_conf_lit_flag
+        + 0.04 * mech_flag
+        + 0.04 * pert_flag
+    ).clip(0.0, 0.18)
 
     df["translational_score"] = (
         SCORE_WEIGHTS["relevance"] * df["relevance_score"]
@@ -261,7 +438,9 @@ def compute_translational_scores(df: pd.DataFrame) -> pd.DataFrame:
         + SCORE_WEIGHTS["tractability"] * df["tractability_score"]
         + SCORE_WEIGHTS["human_evidence"] * df["human_evidence_score"]
         + SCORE_WEIGHTS["curated"] * df["curated_score"]
+        + SCORE_WEIGHTS["perturbation_biology"] * df["perturbation_biology_score"]
         + SCORE_WEIGHTS["risk"] * df["risk_score"]
+        + df["evidence_bonus"]
     ).clip(0.0, 1.0)
 
     def assign_tier(score: float) -> str:
@@ -278,20 +457,42 @@ def compute_translational_scores(df: pd.DataFrame) -> pd.DataFrame:
 def compute_geneformer_like_scores(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
+    for col, default in {
+        "mean_lit_confidence": 0.0,
+        "n_unique_papers": 0.0,
+    }.items():
+        if col not in df.columns:
+            df[col] = default
+
     df["gf_regulatory_centrality"] = compute_component_score(df, GF_REGULATORY_FEATURES)
     df["gf_perturbation_impact"] = compute_component_score(df, GF_PERTURBATION_FEATURES)
     df["gf_disease_shift"] = compute_component_score(df, GF_DISEASE_SHIFT_FEATURES)
     df["gf_context_support"] = compute_component_score(df, GF_CONTEXT_FEATURES)
 
+    lit_conf = _safe_numeric(df["mean_lit_confidence"]).fillna(0.0).clip(0.0, 1.0)
+    paper_flag = (_safe_numeric(df["n_unique_papers"]).fillna(0.0) > 0).astype(float)
+
+    df["gf_regulatory_centrality"] = (
+        0.75 * df["gf_regulatory_centrality"].fillna(0.0)
+        + 0.15 * lit_conf
+        + 0.10 * paper_flag
+    ).clip(0.0, 1.0)
+
     risk_raw = compute_component_score(df, GF_RISK_FEATURES)
     df["gf_risk_adjustment"] = (1.0 - risk_raw).clip(0.0, 1.0)
 
+    df["gf_evidence_bonus"] = (
+        0.10 * paper_flag
+        + 0.10 * (lit_conf >= 0.8).astype(float)
+    ).clip(0.0, 0.20)
+
     df["gf_geneformer_like_score"] = (
-        0.30 * df["gf_regulatory_centrality"].fillna(0.0)
-        + 0.30 * df["gf_perturbation_impact"].fillna(0.0)
-        + 0.25 * df["gf_disease_shift"].fillna(0.0)
+        0.28 * df["gf_regulatory_centrality"].fillna(0.0)
+        + 0.32 * df["gf_perturbation_impact"].fillna(0.0)
+        + 0.22 * df["gf_disease_shift"].fillna(0.0)
         + 0.10 * df["gf_context_support"].fillna(0.0)
-        + 0.05 * df["gf_risk_adjustment"].fillna(0.0)
+        + 0.08 * df["gf_risk_adjustment"].fillna(0.0)
+        + df["gf_evidence_bonus"]
     ).clip(0.0, 1.0)
 
     return df
@@ -390,6 +591,11 @@ EXPERIMENT_LOGIC = {
         "Stage-specific validation in hepatocyte and stellate models",
         "Check isoform-specific expression before ASO design",
     ],
+    "high_biology_low_consensus": [
+        "Repeat perturbation in orthogonal liver-relevant model",
+        "Add rescue experiment to confirm directionality",
+        "Profile off-target and hepatocyte identity liabilities",
+    ],
     "default": [
         "Validate differential expression in an independent cohort",
         "Review pathway support and perturbation evidence",
@@ -401,8 +607,10 @@ EXPERIMENT_LOGIC = {
 def recommend_experiments(row: pd.Series) -> list:
     if row.get("curated_tier_score", 0) >= 0.66 and row.get("relevance_score", 0) >= 0.5:
         return EXPERIMENT_LOGIC["high_curated_high_relevance"]
-    if row.get("curated_contradiction_flag", 0) == 1:
+    if row.get("curated_contradiction_flag", 0) == 1 or row.get("contradiction_flag", 0) == 1:
         return EXPERIMENT_LOGIC["contradictory_target"]
+    if row.get("biologic_coherence_score", 0) >= 0.6 and row.get("contradiction_penalty", 0) >= 0.25:
+        return EXPERIMENT_LOGIC["high_biology_low_consensus"]
     if row.get("mechanism_score", 0) > 0.5 and row.get("human_evidence_score", 0) < 0.3:
         return EXPERIMENT_LOGIC["high_mechanism_low_clinical"]
     return EXPERIMENT_LOGIC["default"]
@@ -419,6 +627,12 @@ def build_risk_flags(row: pd.Series) -> list:
         flags.append("High isoform complexity may complicate oligo design")
     if row.get("curated_contradiction_flag", 0):
         flags.append("Manual curation flagged this target as contradictory/context-dependent")
+    if row.get("contradiction_flag", 0):
+        flags.append("Perturbation evidence contains supportive and opposing studies")
+    if row.get("contradiction_penalty", 0) >= 0.25:
+        flags.append(f"Contradiction penalty elevated ({row.get('contradiction_penalty', 0):.2f})")
+    if row.get("mean_safety_penalty", 0) >= 0.25:
+        flags.append(f"Biology-aware safety penalty elevated ({row.get('mean_safety_penalty', 0):.2f})")
     if row.get("curated_exists", 0) == 0:
         flags.append("No curated liver-disease evidence currently linked")
 
@@ -440,6 +654,8 @@ def ensure_target_scores_schema(conn: sqlite3.Connection):
             mechanism_score REAL,
             tractability_score REAL,
             human_evidence_score REAL,
+            curated_score REAL,
+            perturbation_biology_score REAL,
             risk_score REAL,
             translational_score REAL,
             confidence_tier TEXT,
@@ -483,7 +699,15 @@ def ensure_target_scores_schema(conn: sqlite3.Connection):
             risk_ubiquitous INTEGER,
             risk_contradictory_lit INTEGER,
             risk_high_isoforms INTEGER,
-            curated_contradiction_flag INTEGER
+            curated_contradiction_flag INTEGER,
+            biologic_coherence_score REAL,
+            best_biologic_evidence REAL,
+            mean_evidence_quality REAL,
+            mean_safety_penalty REAL,
+            perturbation_study_count REAL,
+            contradiction_flag INTEGER,
+            contradiction_penalty REAL,
+            final_perturbation_biology_score REAL
         )
         """
     )
@@ -491,6 +715,8 @@ def ensure_target_scores_schema(conn: sqlite3.Connection):
     existing_cols = pd.read_sql_query("PRAGMA table_info(target_scores);", conn)["name"].tolist()
 
     extra_schema = {
+        "curated_score": "REAL",
+        "perturbation_biology_score": "REAL",
         "scored_date": "TEXT",
         "expr_mean_tcga_pancan": "REAL",
         "expr_median_tcga_pancan": "REAL",
@@ -528,6 +754,14 @@ def ensure_target_scores_schema(conn: sqlite3.Connection):
         "risk_contradictory_lit": "INTEGER",
         "risk_high_isoforms": "INTEGER",
         "curated_contradiction_flag": "INTEGER",
+        "biologic_coherence_score": "REAL",
+        "best_biologic_evidence": "REAL",
+        "mean_evidence_quality": "REAL",
+        "mean_safety_penalty": "REAL",
+        "perturbation_study_count": "REAL",
+        "contradiction_flag": "INTEGER",
+        "contradiction_penalty": "REAL",
+        "final_perturbation_biology_score": "REAL",
     }
 
     for col, col_type in extra_schema.items():
@@ -540,8 +774,8 @@ def save_scores_to_db(
     db_path="ncrna_platform.db",
     disease_id="DIS_001",
     context_id="CTX_001",
-    model_version="v2.5",
-    gf_model_version="gf_v0.5",
+    model_version="v3.1_biocoherence_evidenceaware",
+    gf_model_version="gf_v0.7",
 ):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -555,9 +789,7 @@ def save_scores_to_db(
 
         top_ev = []
         if row.get("curated_exists", 0):
-            top_ev.append(
-                f"Curated liver evidence tier score = {row.get('curated_tier_score', 0):.2f}"
-            )
+            top_ev.append(f"Curated liver evidence tier score = {row.get('curated_tier_score', 0):.2f}")
         if row.get("mean_abs_log2fc", 0) > 0:
             top_ev.append(f"Mean |log2FC| = {row.get('mean_abs_log2fc', 0):.2f}")
         if row.get("sig_rate", 0) > 0:
@@ -567,17 +799,17 @@ def save_scores_to_db(
         if row.get("mean_clinical_r", 0) > 0:
             top_ev.append(f"Clinical correlation r = {row.get('mean_clinical_r', 0):.2f}")
         if row.get("n_high_conf_perts", 0) > 0:
-            top_ev.append(
-                f"{int(row.get('n_high_conf_perts', 0))} high-confidence perturbation studies"
-            )
+            top_ev.append(f"{int(row.get('n_high_conf_perts', 0))} high-confidence perturbation studies")
+        if row.get("n_unique_papers", 0) > 0:
+            top_ev.append(f"{int(row.get('n_unique_papers', 0))} curated paper(s); mean confidence = {row.get('mean_lit_confidence', 0):.2f}")
+        if row.get("biologic_coherence_score", 0) > 0:
+            top_ev.append(f"Biologic coherence score = {row.get('biologic_coherence_score', 0):.2f}")
+        if row.get("contradiction_penalty", 0) > 0:
+            top_ev.append(f"Contradiction penalty = {row.get('contradiction_penalty', 0):.2f}")
         if row.get("in_tcga_pancan_expr", 0):
-            top_ev.append(
-                f"TCGA pan-cancer mean expression = {row.get('expr_mean_tcga_pancan', 0):.2f}"
-            )
+            top_ev.append(f"TCGA pan-cancer mean expression = {row.get('expr_mean_tcga_pancan', 0):.2f}")
         if row.get("gf_geneformer_like_score", 0) > 0:
-            top_ev.append(
-                f"Geneformer-like score = {row.get('gf_geneformer_like_score', 0):.2f}"
-            )
+            top_ev.append(f"Geneformer-like score = {row.get('gf_geneformer_like_score', 0):.2f}")
 
         if not top_ev:
             top_ev = ["Limited evidence available"]
@@ -592,6 +824,8 @@ def save_scores_to_db(
             "mechanism_score",
             "tractability_score",
             "human_evidence_score",
+            "curated_score",
+            "perturbation_biology_score",
             "risk_score",
             "translational_score",
             "confidence_tier",
@@ -636,6 +870,14 @@ def save_scores_to_db(
             "risk_contradictory_lit",
             "risk_high_isoforms",
             "curated_contradiction_flag",
+            "biologic_coherence_score",
+            "best_biologic_evidence",
+            "mean_evidence_quality",
+            "mean_safety_penalty",
+            "perturbation_study_count",
+            "contradiction_flag",
+            "contradiction_penalty",
+            "final_perturbation_biology_score",
         ]
 
         values = (
@@ -648,6 +890,8 @@ def save_scores_to_db(
             round(float(row.get("mechanism_score", 0)), 4),
             round(float(row.get("tractability_score", 0)), 4),
             round(float(row.get("human_evidence_score", 0)), 4),
+            round(float(row.get("curated_score", 0)), 4),
+            round(float(row.get("perturbation_biology_score", 0)), 4),
             round(float(row.get("risk_score", 0)), 4),
             round(float(row.get("translational_score", 0)), 4),
             row.get("confidence_tier", "Tier 3 — Exploratory"),
@@ -692,6 +936,14 @@ def save_scores_to_db(
             int(row.get("risk_contradictory_lit", 0)),
             int(row.get("risk_high_isoforms", 0)),
             int(row.get("curated_contradiction_flag", 0)),
+            round(float(row.get("biologic_coherence_score", 0)), 6),
+            round(float(row.get("best_biologic_evidence", 0)), 6),
+            round(float(row.get("mean_evidence_quality", 0)), 6),
+            round(float(row.get("mean_safety_penalty", 0)), 6),
+            round(float(row.get("perturbation_study_count", 0)), 6),
+            int(row.get("contradiction_flag", 0)),
+            round(float(row.get("contradiction_penalty", 0)), 6),
+            round(float(row.get("final_perturbation_biology_score", 0)), 6),
         )
 
         sql = f"""
@@ -714,6 +966,8 @@ def run_scoring_pipeline(
     print(f"   Disease: {disease_id}  |  Context: {context_id}\n")
 
     feat_df = build_feature_matrix(db_path, disease_id, context_id)
+    feat_df = merge_biologic_coherence_features(feat_df, db_path, disease_id, context_id)
+
     scored_df = compute_translational_scores(feat_df)
     scored_df = compute_geneformer_like_scores(scored_df)
 
@@ -730,7 +984,12 @@ def run_scoring_pipeline(
         "relevance_score",
         "specificity_score",
         "mechanism_score",
+        "perturbation_biology_score",
+        "biologic_coherence_score",
+        "contradiction_penalty",
         "human_evidence_score",
+        "n_unique_papers",
+        "mean_lit_confidence",
     ]
     if "expr_mean_tcga_pancan" in scored_df.columns:
         display_cols.append("expr_mean_tcga_pancan")

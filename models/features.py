@@ -16,7 +16,11 @@ EXPR_SUMMARY_PATH = (
 )
 
 
-def _safe_read_sql(query: str, conn: sqlite3.Connection, params: dict | None = None) -> pd.DataFrame:
+def _safe_read_sql(
+    query: str,
+    conn: sqlite3.Connection,
+    params: dict | None = None,
+) -> pd.DataFrame:
     try:
         return pd.read_sql_query(query, conn, params=params or {})
     except Exception:
@@ -97,11 +101,13 @@ def build_feature_matrix(
     disease_id: str = "DIS_001",
     context_id: str = "CTX_001",
 ) -> pd.DataFrame:
+    """
+    Build a per-ncRNA feature matrix by merging evidence from multiple tables.
+    """
     conn = sqlite3.connect(db_path)
-
     params = {"disease_id": disease_id, "context_id": context_id}
 
-    # NEW: aggregated expression features table built from expression_evidence
+    # Aggregated expression features (precomputed)
     expr_feat_q = """
         SELECT
             ef.ncrna_id,
@@ -127,7 +133,7 @@ def build_feature_matrix(
     """
     expr_feat_df = _safe_read_sql(expr_feat_q, conn, params=params)
 
-    # Fallback: direct aggregation from expression_evidence if expression_features is missing/empty
+    # Fallback: direct aggregation from expression_evidence
     if expr_feat_df.empty:
         expr_q = """
             SELECT
@@ -196,6 +202,44 @@ def build_feature_matrix(
         ).astype(int)
         tract_df["isoform_complexity"] = np.log1p(tract_df["isoform_count"].fillna(0))
 
+    # Binding features (PaRPI / iDeepB summary)
+    binding_q = """
+        SELECT
+            ncrna_id,
+            n_high_conf_rbps,
+            max_rbp_score,
+            mean_top5_rbp_score,
+            liver_rbp_score,
+            max_peak_score,
+            peak_density,
+            n_binding_hotspots,
+            hotspot_5prime_fraction,
+            hotspot_3prime_fraction,
+            binding_mechanism_score,
+            binding_targetability_score,
+            binding_risk_score
+        FROM binding_features
+    """
+    binding_df = _safe_read_sql(binding_q, conn)
+    if binding_df.empty:
+        binding_df = pd.DataFrame(
+            columns=[
+                "ncrna_id",
+                "n_high_conf_rbps",
+                "max_rbp_score",
+                "mean_top5_rbp_score",
+                "liver_rbp_score",
+                "max_peak_score",
+                "peak_density",
+                "n_binding_hotspots",
+                "hotspot_5prime_fraction",
+                "hotspot_3prime_fraction",
+                "binding_mechanism_score",
+                "binding_targetability_score",
+                "binding_risk_score",
+            ]
+        )
+
     # Perturbation evidence
     pert_q = """
         SELECT
@@ -247,6 +291,25 @@ def build_feature_matrix(
     """
     lit_df = _safe_read_sql(lit_q, conn)
 
+    # NEW: downstream effects (mechanism + phenotype)
+    effects_q = """
+        SELECT
+            ncrna_id,
+            COUNT(*) AS n_effects,
+            AVG(evidence_score) AS mean_effect_confidence,
+            SUM(CASE WHEN phenotype_direction = 'improves' THEN 1 ELSE 0 END) AS n_improving_effects,
+            SUM(CASE WHEN phenotype_direction = 'worsens' THEN 1 ELSE 0 END) AS n_worsening_effects,
+            SUM(CASE WHEN phenotype_category = 'steatosis' AND phenotype_direction = 'improves' THEN 1 ELSE 0 END) AS n_steatosis_improves,
+            SUM(CASE WHEN phenotype_category = 'steatosis' AND phenotype_direction = 'worsens' THEN 1 ELSE 0 END) AS n_steatosis_worsens,
+            SUM(CASE WHEN phenotype_category = 'fibrosis' AND phenotype_direction = 'improves' THEN 1 ELSE 0 END) AS n_fibrosis_improves,
+            SUM(CASE WHEN phenotype_category = 'fibrosis' AND phenotype_direction = 'worsens' THEN 1 ELSE 0 END) AS n_fibrosis_worsens,
+            SUM(CASE WHEN phenotype_category = 'proliferation' AND phenotype_direction = 'improves' THEN 1 ELSE 0 END) AS n_proliferation_improves,
+            SUM(CASE WHEN phenotype_category = 'proliferation' AND phenotype_direction = 'worsens' THEN 1 ELSE 0 END) AS n_proliferation_worsens
+        FROM downstream_effects
+        GROUP BY ncrna_id
+    """
+    effects_df = _safe_read_sql(effects_q, conn)
+
     # Master ncRNA registry
     master_q = """
         SELECT
@@ -259,7 +322,7 @@ def build_feature_matrix(
     """
     master_df = pd.read_sql_query(master_q, conn)
 
-    # Curated liver-disease targets
+    # Curated liver-disease targets (if present)
     curated_q = """
         SELECT
             symbol,
@@ -287,10 +350,22 @@ def build_feature_matrix(
     # Start from master list
     df = master_df.copy()
 
-    # Merge by ncrna_id
-    for sub_df in [expr_feat_df, tract_df, pert_df, clin_df, pw_df, lit_df]:
+    # Merge by ncrna_id: expression, tractability, binding, perturbation, clinical, pathways, literature, downstream effects
+    for sub_df in [
+        expr_feat_df,
+        tract_df,
+        binding_df,
+        pert_df,
+        clin_df,
+        pw_df,
+        lit_df,
+        effects_df,
+    ]:
         if not sub_df.empty:
-            merge_cols = [c for c in sub_df.columns if c not in ["disease_id", "context_id"]]
+            merge_cols = [
+                c for c in sub_df.columns
+                if c not in ["disease_id", "context_id"]
+            ]
             sub_df = sub_df[merge_cols].copy()
             df = df.merge(sub_df, on="ncrna_id", how="left")
 
@@ -310,7 +385,7 @@ def build_feature_matrix(
         if "ensembl_id_expr" in df.columns:
             df = df.drop(columns=["ensembl_id_expr"])
 
-    # Basic cleaning
+    # Basic numeric cleaning
     numeric_cols = df.select_dtypes(include=["number"]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0)
 
@@ -367,6 +442,17 @@ def build_feature_matrix(
         "curated_fibrosis_flag": 0.0,
         "curated_mash_flag": 0.0,
         "curated_record_count": 0.0,
+        # NEW: downstream-effect summary defaults
+        "n_effects": 0.0,
+        "mean_effect_confidence": 0.0,
+        "n_improving_effects": 0.0,
+        "n_worsening_effects": 0.0,
+        "n_steatosis_improves": 0.0,
+        "n_steatosis_worsens": 0.0,
+        "n_fibrosis_improves": 0.0,
+        "n_fibrosis_worsens": 0.0,
+        "n_proliferation_improves": 0.0,
+        "n_proliferation_worsens": 0.0,
     }
 
     for col, default_val in required_defaults.items():
@@ -374,6 +460,27 @@ def build_feature_matrix(
             df[col] = default_val
         else:
             df[col] = df[col].fillna(default_val)
+
+    # Binding feature defaults (explicitly ensure 0.0 for missing values)
+    binding_fill_cols = [
+        "n_high_conf_rbps",
+        "max_rbp_score",
+        "mean_top5_rbp_score",
+        "liver_rbp_score",
+        "max_peak_score",
+        "peak_density",
+        "n_binding_hotspots",
+        "hotspot_5prime_fraction",
+        "hotspot_3prime_fraction",
+        "binding_mechanism_score",
+        "binding_targetability_score",
+        "binding_risk_score",
+    ]
+    for col in binding_fill_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        else:
+            df[col] = 0.0
 
     # Risk flags
     df["risk_ubiquitous"] = (df["mean_tau"] < 0.4).astype(int)

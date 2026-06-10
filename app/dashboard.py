@@ -153,24 +153,20 @@ INFERRED_EVIDENCE_TYPES = {
 def load_scores(db_path: Path) -> pd.DataFrame:
     conn = sqlite3.connect(db_path)
 
-    try:
-        df = pd.read_sql_query("SELECT * FROM vw_target_scores_enriched", conn)
-    except Exception:
-        df = pd.read_sql_query(
-            """
-            SELECT
-                ts.*,
-                nm.symbol,
-                nm.biotype,
-                nm.conservation_score AS nm_conservation_score,
-                nm.transcript_count
-            FROM target_scores ts
-            LEFT JOIN ncrna_master nm
-                ON ts.ncrna_id = nm.ncrna_id
-            """,
-            conn,
-        )
-
+    df = pd.read_sql_query(
+        """
+        SELECT
+            ts.*,
+            nm.symbol,
+            nm.biotype,
+            nm.conservation_score AS nm_conservation_score,
+            nm.transcript_count
+        FROM target_scores ts
+        LEFT JOIN ncrna_master nm
+            ON ts.ncrna_id = nm.ncrna_id
+        """,
+        conn,
+    )
     conn.close()
 
     if "conservation_score" not in df.columns and "nm_conservation_score" in df.columns:
@@ -198,7 +194,13 @@ def load_scores(db_path: Path) -> pd.DataFrame:
             df[col] = "[]"
 
     if "symbol" not in df.columns:
-        df["symbol"] = df["ncrna_id"].astype(str)
+        if "ncrna_id" in df.columns:
+            df["symbol"] = df["ncrna_id"].astype(str)
+        else:
+            df["symbol"] = "NA"
+
+    if "ncrna_id" not in df.columns:
+        df["ncrna_id"] = df["symbol"].astype(str)
 
     df["symbol"] = df["symbol"].fillna(df["ncrna_id"].astype(str)).astype(str)
     df["top_evidence_list"] = df["top_evidence"].apply(safe_json_list)
@@ -336,6 +338,8 @@ def load_literature_evidence(db_path: Path) -> pd.DataFrame:
 
 def safe_float(value, default=0.0):
     try:
+        if value is None:
+            return default
         if pd.isna(value):
             return default
         return float(value)
@@ -345,6 +349,8 @@ def safe_float(value, default=0.0):
 
 def safe_int(value, default=0):
     try:
+        if value is None:
+            return default
         if pd.isna(value):
             return default
         return int(value)
@@ -844,11 +850,11 @@ def main():
     comparison_summary = load_comparison_summary()
 
     if scores_df.empty:
-        st.warning("No rows found in target_scores. Run the scoring pipeline first.")
+        st.warning("No rows found in ncRNA_scores. Run the scoring pipeline first.")
         return
 
     if "confidence_tier" not in scores_df.columns:
-        st.warning("confidence_tier column missing from target_scores — some tier filtering may be unavailable.")
+        st.warning("confidence_tier column missing from ncRNA_scores — some tier filtering may be unavailable.")
         return
 
     scores_df["confidence_tier_norm"] = scores_df["confidence_tier"].apply(normalize_tier_label)
