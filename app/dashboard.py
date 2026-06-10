@@ -305,7 +305,7 @@ def load_literature_evidence(db_path: Path) -> pd.DataFrame:
                 le.year,
                 le.is_contradictory,
                 le.added_date
-            FROM literature_evidence le
+            FROM literature_evidence_v2 le
             LEFT JOIN ncrna_master nm
                 ON le.ncrna_id = nm.ncrna_id
             """,
@@ -850,11 +850,11 @@ def main():
     comparison_summary = load_comparison_summary()
 
     if scores_df.empty:
-        st.warning("No rows found in ncRNA_scores. Run the scoring pipeline first.")
+        st.warning("No rows found in target_scores. Run the scoring pipeline first.")
         return
 
     if "confidence_tier" not in scores_df.columns:
-        st.warning("confidence_tier column missing from ncRNA_scores — some tier filtering may be unavailable.")
+        st.warning("confidence_tier column missing from target_scores — some tier filtering may be unavailable.")
         return
 
     scores_df["confidence_tier_norm"] = scores_df["confidence_tier"].apply(normalize_tier_label)
@@ -914,9 +914,11 @@ def main():
         st.info("No targets match the current filters.")
         return
 
-    filtered_df["has_curated_evidence"] = (
-        filtered_df["top_evidence"].fillna("").astype(str).str.contains("Curated liver evidence", case=False)
-    )
+    curated_symbols = set()
+    if not curated_df.empty and "symbol" in curated_df.columns:
+        curated_symbols = set(curated_df["symbol"].dropna().astype(str).tolist())
+
+    filtered_df["has_curated_evidence"] = filtered_df["symbol"].astype(str).isin(curated_symbols)
 
     supported_ncrna_ids = set()
     if not downstream_df.empty and "ncrna_id" in downstream_df.columns and "evidence_type" in downstream_df.columns:
@@ -942,6 +944,12 @@ def main():
         st.info("No targets match the current filters.")
         return
 
+    filtered_df = (
+        filtered_df.sort_values([sort_col, "translational_score"], ascending=False)
+        .drop_duplicates(subset=["symbol"], keep="first")
+        .copy()
+    )
+
     filtered_df["Baseline rank"] = (
         filtered_df["translational_score"].rank(method="dense", ascending=False).astype(int)
     )
@@ -954,12 +962,6 @@ def main():
     filtered_df["Delta rank"] = filtered_df["Baseline rank"] - filtered_df["Geneformer rank"]
     filtered_df["Delta rank display"] = filtered_df["Delta rank"].apply(delta_rank_display)
     filtered_df["Tier badge"] = filtered_df["confidence_tier_norm"].apply(style_confidence_tier)
-
-    filtered_df = (
-        filtered_df.sort_values([sort_col, "translational_score"], ascending=False)
-        .drop_duplicates(subset=["symbol"], keep="first")
-        .copy()
-    )
 
     top_row = filtered_df.iloc[0]
     positive_delta_n = int((filtered_df["Delta rank"] > 0).sum())
