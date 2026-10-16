@@ -24,3 +24,7 @@ venv/
 # Output
 output/
 logs/
+
+# Backups
+*.bak
+*.bak_*
